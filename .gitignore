@@ -1,6 +1,17 @@
 ﻿# Build outputs
 bin/
 obj/
+TestResults/
+coverage/
+
+# Local temporary and package outputs
+.tmp-*/
+*.tmp
+*.bak
+*.old
+*.orig
+*.nupkg
+*.snupkg
 
 # Visual Studio / Rider / VS Code
 .vs/
