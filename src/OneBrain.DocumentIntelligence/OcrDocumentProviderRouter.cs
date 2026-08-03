@@ -4,6 +4,7 @@ namespace OneBrain.DocumentIntelligence;
 
 public enum OcrProviderKind
 {
+    DeterministicPdfInspector,
     LocalOcr,
     PaidOcr,
     DocumentAi,
@@ -15,6 +16,7 @@ public enum OcrProviderMode
 {
     Disabled,
     FixtureOnly,
+    LocalOnly,
     DesignOnly,
     LiveCandidateBlocked
 }
@@ -23,12 +25,14 @@ public enum OcrInputKind
 {
     ImageFixture,
     PdfFixture,
+    PdfLocalFile,
     DocumentFixture,
     ScreenshotCropFixture
 }
 
 public enum OcrOutputKind
 {
+    RoutingMetadata,
     Text,
     Markdown,
     StructuredBlocks,
@@ -39,6 +43,9 @@ public enum OcrOutputKind
 
 public enum OcrProviderCapability
 {
+    PdfPreflightClassification,
+    PageLevelOcrRouting,
+    EncodingIssueDetection,
     TextExtraction,
     LayoutDetection,
     BoundingBoxes,
@@ -105,6 +112,10 @@ public enum OcrExecutionMode
 
 public enum OcrRoutingDecisionKind
 {
+    RecommendNativePdfExtractionCandidate,
+    RecommendHybridPdfExtractionAndOcr,
+    RecommendLocalOcrForPdfPages,
+    BlockDueToPdfPreflightFailure,
     UseLocalOcrFixture,
     RecommendMistralOcr4Candidate,
     RecommendMistralDocumentAiCandidate,
@@ -173,7 +184,10 @@ public sealed record OcrProviderRoutingRequest(
     bool ContainsPaymentLikeFlow = false,
     bool ContainsFiscalSubmissionLikeFlow = false,
     bool ConflictingFieldsDetected = false,
-    double? ExtractionConfidence = null);
+    double? ExtractionConfidence = null)
+{
+    public PdfPreflightResult? PdfPreflight { get; init; }
+}
 
 public sealed record OcrConfidencePolicy(
     double HighThreshold = 0.90,
@@ -274,6 +288,18 @@ public sealed class OcrProviderRegistry
 
     public IReadOnlyList<OcrProviderDescriptor> Providers { get; } =
     [
+        Provider(
+            "local.pdf_inspector_preflight",
+            OcrProviderKind.DeterministicPdfInspector,
+            OcrProviderMode.LocalOnly,
+            Set(OcrInputKind.PdfLocalFile),
+            Set(OcrOutputKind.RoutingMetadata),
+            Set(
+                OcrProviderCapability.PdfPreflightClassification,
+                OcrProviderCapability.PageLevelOcrRouting,
+                OcrProviderCapability.EncodingIssueDetection,
+                OcrProviderCapability.LayoutDetection),
+            "pinned local PDF preflight; no extraction, persistence, network, OCR, or authority"),
         Provider(
             "local.onnx_ocr_fixture",
             OcrProviderKind.LocalOcr,
@@ -399,6 +425,9 @@ public sealed class OcrProviderRouter
             return Decision(OcrRoutingDecisionKind.BlockDueToSensitiveUnredactedInput, null, OcrProviderMode.Disabled, request, confidence, ["Sensitive or regulated input must be redacted and human-reviewed before any cloud candidate recommendation."]);
         }
 
+        if (request.InputKind == OcrInputKind.PdfLocalFile)
+            return RoutePdfPreflight(request, confidence);
+
         if (request.CostMode == OcrCostMode.FreeOnly)
         {
             return Decision(OcrRoutingDecisionKind.UseLocalOcrFixture, "local.onnx_ocr_fixture", OcrProviderMode.FixtureOnly, request, confidence, ["Free-only mode selects local fixture OCR or human review."]);
@@ -426,6 +455,77 @@ public sealed class OcrProviderRouter
 
         reasons.Add("No safe provider candidate matched; human review required.");
         return Decision(OcrRoutingDecisionKind.RequireHumanReview, "human.review", OcrProviderMode.FixtureOnly, request, confidence, reasons);
+    }
+
+    private OcrProviderRoutingDecision RoutePdfPreflight(
+        OcrProviderRoutingRequest request,
+        OcrConfidenceEvaluation confidence)
+    {
+        var preflight = request.PdfPreflight;
+        if (preflight is null || preflight.Status != PdfPreflightStatus.Ready || preflight.Blocker != PdfPreflightBlocker.None)
+        {
+            return Decision(
+                OcrRoutingDecisionKind.BlockDueToPdfPreflightFailure,
+                null,
+                OcrProviderMode.Disabled,
+                request,
+                confidence,
+                ["Validated local PDF preflight is required before technique selection."]);
+        }
+
+        if (preflight.ExecutionAuthorized || preflight.RawContentPersisted || preflight.NetworkUsed || preflight.ActionAuthority)
+        {
+            return Decision(
+                OcrRoutingDecisionKind.BlockDueToPdfPreflightFailure,
+                null,
+                OcrProviderMode.Disabled,
+                request,
+                confidence,
+                ["PDF preflight contradicted the local no-authority contract."]);
+        }
+
+        var reviewedRequest = request with
+        {
+            ConflictingFieldsDetected = request.ConflictingFieldsDetected || preflight.HumanReviewRequired
+        };
+        var pageSummary = preflight.PagesNeedingOcr.Count == 0
+            ? "no pages require OCR"
+            : $"OCR candidate pages: {string.Join(",", preflight.PagesNeedingOcr)}";
+
+        return preflight.RecommendedTechnique switch
+        {
+            PdfRecommendedTechnique.NativeTextExtraction or PdfRecommendedTechnique.NativeStructuredExtraction =>
+                Decision(
+                    OcrRoutingDecisionKind.RecommendNativePdfExtractionCandidate,
+                    "local.pdf_inspector_preflight",
+                    OcrProviderMode.LocalOnly,
+                    reviewedRequest,
+                    confidence,
+                    [$"Local PDF preflight recommends {preflight.RecommendedTechnique}; {pageSummary}; extraction remains a separate unauthorized candidate."]),
+            PdfRecommendedTechnique.HybridNativeAndLocalOcr =>
+                Decision(
+                    OcrRoutingDecisionKind.RecommendHybridPdfExtractionAndOcr,
+                    "local.pdf_inspector_preflight",
+                    OcrProviderMode.LocalOnly,
+                    reviewedRequest,
+                    confidence,
+                    [$"Local PDF preflight recommends native extraction plus page-level OCR; {pageSummary}; OCR execution remains blocked."]),
+            PdfRecommendedTechnique.LocalOcrAllPages =>
+                Decision(
+                    OcrRoutingDecisionKind.RecommendLocalOcrForPdfPages,
+                    "local.pdf_inspector_preflight",
+                    OcrProviderMode.LocalOnly,
+                    reviewedRequest,
+                    confidence,
+                    [$"Local PDF preflight recommends local OCR for all pages; {pageSummary}; OCR execution remains blocked."]),
+            _ => Decision(
+                OcrRoutingDecisionKind.BlockDueToPdfPreflightFailure,
+                null,
+                OcrProviderMode.Disabled,
+                reviewedRequest,
+                confidence,
+                ["PDF preflight did not produce a safe local technique recommendation."])
+        };
     }
 
     private OcrProviderRoutingDecision Decision(

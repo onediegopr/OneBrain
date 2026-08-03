@@ -12,6 +12,7 @@ coverage/
 *.orig
 *.nupkg
 *.snupkg
+/tools/pdf-preflight-sidecar/target/
 
 # Visual Studio / Rider / VS Code
 .vs/
