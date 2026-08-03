@@ -57,6 +57,7 @@ Provider modes:
 - `Disabled`
 - `FixtureOnly`
 - `DesignOnly`
+- `LocalOnly`
 - `LiveCandidateBlocked`
 
 Mistral entries:
@@ -111,6 +112,12 @@ Default thresholds:
 - missing confidence: review required.
 
 Confidence can only influence observation acceptance, redaction requirements, human review requirements and safe provider recommendation. It cannot authorize actions.
+
+## Local PDF Preflight
+
+`local.pdf_inspector_preflight` is a deterministic, local-only metadata provider backed by the pinned `firecrawl/pdf-inspector` revision `a15ec2d68d51dbe6a39d1da688ec7a3f642d846c`. Before any PDF extraction candidate is selected, it classifies the document as text, mixed, scanned or image-based; reports layout/encoding signals; and identifies the exact pages that may require OCR.
+
+The .NET boundary verifies the input signature and size, sidecar SHA-256, timeout, output limit, schema/revision, page bounds and OCR reason allowlist. It then recommends one of native text extraction, structured native extraction, hybrid page-level OCR or all-page local OCR. A recommendation never executes OCR or extraction, persists raw content, uses network access or grants action authority. Missing, malformed, contradictory or unpinned evidence blocks routing.
 
 ## Evidence And Redaction
 
